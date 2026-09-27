@@ -1,18 +1,32 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createInitialState } from './data';
-import type { ChecklistItem, ChecklistProject, ChecklistRevision, FlightStage, WorkspaceState } from './types';
+import { defaultFlightConditions } from './ops';
+import type { ChecklistItem, ChecklistProject, ChecklistRevision, FlightConditions, FlightStage, WorkspaceState } from './types';
 
 const STORAGE_KEY = 'sologsb-1030-workspace-v1';
 const clone = <T>(value: T): T => structuredClone(value);
 const uid = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 const now = () => new Date().toISOString();
 
+/** 旧版本存档缺少运行条件字段时补齐默认值，保证浏览器里读回的历史数据结构完整。 */
+function migrateState(parsed: WorkspaceState): WorkspaceState {
+  parsed.projects.forEach((project) => {
+    project.flightConditions ??= defaultFlightConditions();
+    project.items.forEach((entry) => { entry.requires ??= []; });
+    project.revisions.forEach((revision) => {
+      revision.flightConditions ??= defaultFlightConditions();
+      revision.items.forEach((entry) => { entry.requires ??= []; });
+    });
+  });
+  return parsed;
+}
+
 function loadState(): WorkspaceState {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
       const parsed = JSON.parse(saved) as WorkspaceState;
-      if (parsed.schemaVersion === 1 && parsed.projects?.length) return parsed;
+      if (parsed.schemaVersion === 1 && parsed.projects?.length) return migrateState(parsed);
     }
   } catch {
     // Corrupted local draft falls back to the bundled operational checklist.
@@ -83,7 +97,8 @@ export function useChecklistStore() {
         reviewNote: '',
         stages: [{ id: uid('stage'), name: '飞行前检查', order: 0, description: '说明本阶段目标。' }],
         items: [],
-        revisions: []
+        revisions: [],
+        flightConditions: defaultFlightConditions()
       });
       next.selectedProjectId = id;
       return next;
@@ -134,7 +149,7 @@ export function useChecklistStore() {
       const stage = project.stages.find((entry) => entry.id === stageId);
       if (!stage) return;
       const order = project.items.filter((item) => item.stageId === stageId).length;
-      project.items.push({ id, stageId, order, challenge, response, critical: false, preconditionIds: [], abnormalProcedure: '', updatedAt: now() });
+      project.items.push({ id, stageId, order, challenge, response, critical: false, preconditionIds: [], abnormalProcedure: '', requires: [], updatedAt: now() });
     });
     return id;
   }, [commit]);
@@ -199,7 +214,8 @@ export function useChecklistStore() {
         createdAt: now(),
         note: note.trim() || '复核通过并冻结',
         stages: clone(project.stages),
-        items: clone(project.items)
+        items: clone(project.items),
+        flightConditions: clone(project.flightConditions)
       };
       project.revisions.unshift(snapshot);
       project.status = 'frozen';
@@ -212,9 +228,26 @@ export function useChecklistStore() {
       project.revision += 1;
       project.status = 'draft';
       project.reviewNote = '';
+      // 原设置（含航班条件选择）继续有效，机组在其基础上修改。
       project.updatedAt = now();
     });
   }, [directUpdate]);
+
+  /**
+   * 执行视图按航段切换航班条件；任何工作流状态下都允许（冻结的是检查单内容，
+   * 不是本次航班的运行条件）。选择立即写入浏览器，刷新后读回。
+   */
+  const setFlightConditions = useCallback((patch: Partial<FlightConditions>) => {
+    setState((current) => {
+      past.current = [...past.current.slice(-39), clone(current)];
+      future.current = [];
+      forceHistoryState((value) => value + 1);
+      const next = clone(current);
+      const project = next.projects.find((entry) => entry.id === next.selectedProjectId);
+      if (project) project.flightConditions = { ...project.flightConditions, ...patch };
+      return next;
+    });
+  }, []);
 
   const undo = useCallback(() => {
     setState((current) => {
@@ -261,6 +294,7 @@ export function useChecklistStore() {
     submitForReview,
     freezeRevision,
     createRevision,
+    setFlightConditions,
     undo,
     redo,
     saveNow

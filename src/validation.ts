@@ -1,3 +1,4 @@
+import { missingConditions, describeMissing } from './ops';
 import type { ChecklistItem, ChecklistProject, ValidationIssue } from './types';
 
 const normalize = (value: string) => value.trim().replace(/\s+/g, ' ').toLocaleLowerCase('en');
@@ -72,6 +73,24 @@ export function validateProject(project: ChecklistProject): ValidationIssue[] {
       add({ id: `${stage.id}-empty`, type: 'orphan-stage', level: 'info', stageId: stage.id, title: '阶段尚未配置检查项', detail: `${stage.name} 当前为空。` });
     }
   });
+
+  // 执行视图按当前航班条件过滤；关键项一旦落入排除区，机组无法执行，禁止提交复核或冻结。
+  project.items
+    .filter((item) => item.critical)
+    .forEach((item) => {
+      const missing = missingConditions(item, project.flightConditions);
+      if (missing.length) {
+        add({
+          id: `${item.id}-critical-excluded`,
+          type: 'critical-excluded',
+          level: 'error',
+          stageId: item.stageId,
+          itemId: item.id,
+          title: '关键项被运行条件排除',
+          detail: `关键项“${item.challenge || '未命名检查项'}”在当前航班条件下不会执行（${describeMissing(missing)}）。请在执行视图补齐航班条件，或调整该项的条件要求。`
+        });
+      }
+    });
 
   return issues;
 }
