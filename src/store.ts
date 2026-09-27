@@ -1,18 +1,54 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { createInitialState } from './data';
-import type { ChecklistItem, ChecklistProject, ChecklistRevision, FlightStage, WorkspaceState } from './types';
+import type { ChecklistItem, ChecklistProject, ChecklistRevision, FlightStage, OperationCondition, WorkspaceState } from './types';
 
 const STORAGE_KEY = 'sologsb-1030-workspace-v1';
 const clone = <T>(value: T): T => structuredClone(value);
 const uid = (prefix: string) => `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 const now = () => new Date().toISOString();
 
+type StoredItem = Partial<ChecklistItem> & Pick<ChecklistItem, 'id' | 'stageId'>;
+type StoredRevision = Omit<ChecklistRevision, 'items'> & { items: StoredItem[] };
+type StoredProject = Omit<ChecklistProject, 'items' | 'revisions' | 'flightConditions'> & {
+  flightConditions?: OperationCondition[];
+  items: StoredItem[];
+  revisions: StoredRevision[];
+};
+
+const withItemDefaults = (item: StoredItem): ChecklistItem => ({
+  critical: false,
+  preconditionIds: [],
+  abnormalProcedure: '',
+  challenge: '',
+  response: '',
+  order: 0,
+  updatedAt: now(),
+  ...item,
+  requiredConditions: Array.isArray(item.requiredConditions) ? item.requiredConditions : []
+});
+
+/** 读取 v1 / v2 本地数据，为运行条件字段补默认值后统一成 v2。 */
+export function migrateState(parsed: { schemaVersion?: number; selectedProjectId?: string; projects?: StoredProject[] }): WorkspaceState | null {
+  if ((parsed.schemaVersion !== 1 && parsed.schemaVersion !== 2) || !parsed.projects?.length) return null;
+  const projects: ChecklistProject[] = parsed.projects.map((project) => ({
+    ...project,
+    flightConditions: Array.isArray(project.flightConditions) ? project.flightConditions : [],
+    items: (project.items ?? []).map(withItemDefaults),
+    revisions: (project.revisions ?? []).map((revision) => ({ ...revision, items: (revision.items ?? []).map(withItemDefaults) }))
+  }));
+  return {
+    schemaVersion: 2,
+    selectedProjectId: projects.some((project) => project.id === parsed.selectedProjectId) ? parsed.selectedProjectId! : projects[0].id,
+    projects
+  };
+}
+
 function loadState(): WorkspaceState {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
-      const parsed = JSON.parse(saved) as WorkspaceState;
-      if (parsed.schemaVersion === 1 && parsed.projects?.length) return parsed;
+      const migrated = migrateState(JSON.parse(saved));
+      if (migrated) return migrated;
     }
   } catch {
     // Corrupted local draft falls back to the bundled operational checklist.
@@ -81,6 +117,7 @@ export function useChecklistStore() {
         status: 'draft',
         updatedAt: now(),
         reviewNote: '',
+        flightConditions: [],
         stages: [{ id: uid('stage'), name: '飞行前检查', order: 0, description: '说明本阶段目标。' }],
         items: [],
         revisions: []
@@ -95,6 +132,13 @@ export function useChecklistStore() {
       Object.assign(project, patch);
     });
   }, [commit]);
+
+  // 航班运行条件属于每次飞行的选择，不进入编辑撤销历史，但会随工作区写入浏览器。
+  const setFlightConditions = useCallback((conditions: OperationCondition[]) => {
+    setState((current) => updateSelected(current, (project) => {
+      project.flightConditions = conditions;
+    }));
+  }, []);
 
   const addStage = useCallback(() => {
     commit((project) => {
@@ -134,7 +178,7 @@ export function useChecklistStore() {
       const stage = project.stages.find((entry) => entry.id === stageId);
       if (!stage) return;
       const order = project.items.filter((item) => item.stageId === stageId).length;
-      project.items.push({ id, stageId, order, challenge, response, critical: false, preconditionIds: [], abnormalProcedure: '', updatedAt: now() });
+      project.items.push({ id, stageId, order, challenge, response, critical: false, preconditionIds: [], abnormalProcedure: '', requiredConditions: [], updatedAt: now() });
     });
     return id;
   }, [commit]);
@@ -249,6 +293,7 @@ export function useChecklistStore() {
     selectProject,
     addProject,
     updateProject,
+    setFlightConditions,
     addStage,
     updateStage,
     moveStage,

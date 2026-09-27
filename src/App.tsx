@@ -21,9 +21,10 @@ import {
   Theme,
   Tooltip
 } from '@radix-ui/themes';
+import { OPERATION_CONDITIONS, conditionMeta, formatConditions, missingConditions, normalizeConditions, partitionItems } from './conditions';
 import { buildVersionOptions, diffVersions } from './diff';
 import { useChecklistStore } from './store';
-import type { ChecklistItem, ChecklistProject, IssueLevel, ValidationIssue, WorkflowStatus } from './types';
+import type { ChecklistItem, ChecklistProject, IssueLevel, OperationCondition, ValidationIssue, WorkflowStatus } from './types';
 import { validateProject } from './validation';
 
 const statusMeta: Record<WorkflowStatus, { label: string; color: 'gray' | 'amber' | 'green'; description: string }> = {
@@ -68,6 +69,24 @@ function App() {
   const selectedItem = project.items.find((item) => item.id === selectedItemId);
   const versionOptions = useMemo(() => buildVersionOptions(project), [project]);
   const diffEntries = useMemo(() => diffVersions(project, leftVersion, rightVersion), [project, leftVersion, rightVersion]);
+  const execution = useMemo(() => {
+    const flightConditions = project.flightConditions ?? [];
+    const groups = project.stages
+      .slice()
+      .sort((a, b) => a.order - b.order)
+      .map((stage) => {
+        const stageItems = project.items.filter((item) => item.stageId === stage.id).sort((a, b) => a.order - b.order);
+        const { usable, excluded } = partitionItems(stageItems, flightConditions);
+        return { stage, usable, excluded };
+      });
+    const excludedEntries = groups.flatMap((group) => group.excluded.map((entry) => ({ ...entry, stage: group.stage })));
+    return {
+      groups,
+      usableCount: groups.reduce((sum, group) => sum + group.usable.length, 0),
+      excludedEntries,
+      criticalExcluded: excludedEntries.filter((entry) => entry.item.critical)
+    };
+  }, [project]);
   const filteredStages = useMemo(() => {
     const query = search.trim().toLocaleLowerCase('zh-CN');
     return project.stages
@@ -159,7 +178,7 @@ function App() {
     const stageOrder = project.stages.slice().sort((a, b) => a.order - b.order);
     const body = stageOrder.map((stage) => {
       const rows = project.items.filter((item) => item.stageId === stage.id).sort((a, b) => a.order - b.order).map((item) => `
-        <tr><td>${item.critical ? '<strong>◆</strong> ' : ''}${escapeHtml(item.challenge)}</td><td>${escapeHtml(item.response || '未填写')}</td><td>${escapeHtml(item.abnormalProcedure || '—')}</td></tr>
+        <tr><td>${item.critical ? '<strong>◆</strong> ' : ''}${escapeHtml(item.challenge)}${item.requiredConditions.length ? `<span class="cond"> [${item.requiredConditions.map((condition) => conditionMeta[condition].short).join('·')}]</span>` : ''}</td><td>${escapeHtml(item.response || '未填写')}</td><td>${escapeHtml(item.abnormalProcedure || '—')}</td></tr>
       `).join('');
       return `<section><h2>${escapeHtml(stage.name)}</h2><p>${escapeHtml(stage.description)}</p><table><thead><tr><th>挑战语</th><th>预期回应</th><th>异常处置</th></tr></thead><tbody>${rows || '<tr><td colspan="3">本阶段暂无项目</td></tr>'}</tbody></table></section>`;
     }).join('');
@@ -167,6 +186,7 @@ function App() {
       body{font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#111;margin:36px}
       h1{margin:0 0 4px} .meta{color:#666;margin-bottom:28px} h2{border-bottom:2px solid #222;padding-bottom:5px;margin-top:26px}
       table{width:100%;border-collapse:collapse} th,td{border:1px solid #bbb;padding:7px;text-align:left;vertical-align:top} th{background:#eee}
+      .cond{color:#6d28d9;font-size:11px}
       @media print{body{margin:15mm}section{break-inside:avoid}}
     </style></head><body><h1>${escapeHtml(project.name)}</h1><div class="meta">${escapeHtml(project.aircraft)} · r${project.revision} · ${escapeHtml(statusMeta[project.status].label)} · 导出 ${new Date().toLocaleString('zh-CN')}</div>${body}</body></html>`;
     const url = URL.createObjectURL(new Blob([documentHtml], { type: 'text/html;charset=utf-8' }));
@@ -183,13 +203,26 @@ function App() {
     store.updateItem(item.id, { preconditionIds: [...ids] });
   }
 
+  function toggleRequiredCondition(item: ChecklistItem, condition: OperationCondition) {
+    const selected = new Set(item.requiredConditions);
+    selected.has(condition) ? selected.delete(condition) : selected.add(condition);
+    store.updateItem(item.id, { requiredConditions: normalizeConditions(selected) });
+  }
+
+  function toggleFlightCondition(condition: OperationCondition, checked: boolean) {
+    const selected = new Set(project.flightConditions ?? []);
+    checked ? selected.add(condition) : selected.delete(condition);
+    store.setFlightConditions(normalizeConditions(selected));
+  }
+
   function duplicateItem(item: ChecklistItem) {
     const id = store.addItem(item.stageId, `${item.challenge} - COPY`, item.response);
     window.setTimeout(() => {
       store.updateItem(id, {
         critical: item.critical,
         preconditionIds: [...item.preconditionIds],
-        abnormalProcedure: item.abnormalProcedure
+        abnormalProcedure: item.abnormalProcedure,
+        requiredConditions: [...item.requiredConditions]
       });
       setSelectedItemId(id);
     }, 0);
@@ -248,6 +281,7 @@ function App() {
           <Tabs.Root value={activeTab} onValueChange={setActiveTab}>
             <Tabs.List className="main-tabs">
               <Tabs.Trigger value="editor">编辑清单</Tabs.Trigger>
+              <Tabs.Trigger value="execution">执行视图 {execution.excludedEntries.length > 0 && <Badge size="1" variant="soft" color="amber">排除 {execution.excludedEntries.length}</Badge>}</Tabs.Trigger>
               <Tabs.Trigger value="versions">版本差异 <Badge size="1" variant="soft">{project.revisions.length}</Badge></Tabs.Trigger>
               <Tabs.Trigger value="print">打印预览</Tabs.Trigger>
             </Tabs.List>
@@ -332,6 +366,8 @@ function App() {
                                   <Flex gap="2" align="center" wrap="wrap">
                                     <strong>{item.challenge || '未命名检查项'}</strong>
                                     {item.critical && <Badge color="red" size="1">关键</Badge>}
+                                    {item.requiredConditions.map((condition) => <Badge key={condition} color="violet" size="1">{conditionMeta[condition].short}</Badge>)}
+                                    {missingConditions(item, project.flightConditions ?? []).length > 0 && <Badge color="amber" variant="soft" size="1">当前航班排除</Badge>}
                                     {item.preconditionIds.length > 0 && <Badge color="blue" size="1">{item.preconditionIds.length} 前置</Badge>}
                                     {itemIssues.length > 0 && <Badge color={itemIssues.some((issue) => issue.level === 'error') ? 'red' : 'amber'} size="1">{itemIssues.length} 问题</Badge>}
                                   </Flex>
@@ -365,6 +401,18 @@ function App() {
                             <label><span>预期回应</span><TextField.Root value={selectedItem.response} disabled={project.status !== 'draft'} onChange={(event) => store.updateItem(selectedItem.id, { response: event.target.value })} /></label>
                             <Flex justify="between" align="center"><Text size="2" weight="bold">关键标记</Text><Switch checked={selectedItem.critical} disabled={project.status !== 'draft'} onCheckedChange={(checked) => store.updateItem(selectedItem.id, { critical: checked })} /></Flex>
                             <label><span>异常处理</span><TextArea value={selectedItem.abnormalProcedure} disabled={project.status !== 'draft'} onChange={(event) => store.updateItem(selectedItem.id, { abnormalProcedure: event.target.value })} placeholder="异常条件、立即动作和后续步骤" /></label>
+                            <div>
+                              <Text size="2" weight="bold" mb="2" as="p">运行条件要求</Text>
+                              <div className="precondition-list">
+                                {OPERATION_CONDITIONS.map((condition) => (
+                                  <label key={condition} className="check-row">
+                                    <input type="checkbox" checked={selectedItem.requiredConditions.includes(condition)} disabled={project.status !== 'draft'} onChange={() => toggleRequiredCondition(selectedItem, condition)} />
+                                    <span>{conditionMeta[condition].label}<small className="condition-hint">{conditionMeta[condition].description}</small></span>
+                                  </label>
+                                ))}
+                              </div>
+                              <Text size="1" color="gray">勾选后，仅当航班选择全部对应条件时该检查项才进入执行清单，否则进入排除区。</Text>
+                            </div>
                             <div>
                               <Text size="2" weight="bold" mb="2" as="p">前置条件</Text>
                               <div className="precondition-list">
@@ -406,6 +454,89 @@ function App() {
                     </div>
                   </ScrollArea>
                 </aside>
+              </div>
+            </Tabs.Content>
+
+            <Tabs.Content value="execution">
+              <div className="content-page">
+                <Heading size="7">执行视图</Heading>
+                <Text color="gray" as="p">按本次航班的运行条件筛选检查项：条件满足的进入执行清单，条件不足的进入排除区并说明缺少的条件。</Text>
+
+                <Card className="condition-panel">
+                  <Flex justify="between" align="center" wrap="wrap" gap="3">
+                    <Text size="2" weight="bold">航班运行条件</Text>
+                    <Text size="1" color="gray">选择保存在浏览器中，刷新后自动恢复；创建修订后继续有效。</Text>
+                  </Flex>
+                  <div className="condition-grid">
+                    {OPERATION_CONDITIONS.map((condition) => (
+                      <label key={condition} className={`condition-toggle ${(project.flightConditions ?? []).includes(condition) ? 'active' : ''}`}>
+                        <Switch checked={(project.flightConditions ?? []).includes(condition)} onCheckedChange={(checked) => toggleFlightCondition(condition, checked)} />
+                        <span><strong>{conditionMeta[condition].label}</strong><small>{conditionMeta[condition].description}</small></span>
+                      </label>
+                    ))}
+                  </div>
+                  <Flex gap="2" align="center" wrap="wrap">
+                    <Badge color="green" size="2">可执行 {execution.usableCount} 项</Badge>
+                    <Badge color={execution.excludedEntries.length ? 'amber' : 'gray'} size="2">排除 {execution.excludedEntries.length} 项</Badge>
+                    {(project.flightConditions ?? []).length === 0 && <Text size="1" color="gray">当前未选择任何运行条件，按昼间 / 无结冰 / 目视飞行计算。</Text>}
+                  </Flex>
+                </Card>
+
+                {execution.criticalExcluded.length > 0 && (
+                  <Callout.Root color="red" mt="4">
+                    <Callout.Text>
+                      关键检查项 {execution.criticalExcluded.map((entry) => `“${entry.item.challenge || '未命名'}”`).join('、')} 因条件不足被排除，当前检查单不能提交复核。请补齐航班条件或调整检查项配置。
+                    </Callout.Text>
+                  </Callout.Root>
+                )}
+
+                <div className="execution-list">
+                  {execution.groups.map(({ stage, usable }, stageIndex) => (
+                    <Card key={stage.id} className="execution-stage">
+                      <div className="print-stage-title"><span>{String(stageIndex + 1).padStart(2, '0')}</span><div><Heading size="4">{stage.name}</Heading><Text color="gray" size="1">{stage.description}</Text></div></div>
+                      {usable.length ? (
+                        <table className="execution-table">
+                          <tbody>
+                            {usable.map((item) => (
+                              <tr key={item.id}>
+                                <td className="exec-challenge">{item.critical && <span className="critical-mark">◆</span>} {item.challenge || '未命名检查项'}</td>
+                                <td className="exec-response">{item.response || '未填写'}</td>
+                                <td className="exec-conditions">
+                                  {item.requiredConditions.map((condition) => <Badge key={condition} color="green" variant="soft" size="1">{conditionMeta[condition].short} ✓</Badge>)}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      ) : <Text size="2" color="gray">本阶段在当前航班条件下没有可执行项目。</Text>}
+                    </Card>
+                  ))}
+                </div>
+
+                <Card className="exclusion-zone">
+                  <Flex justify="between" align="center" wrap="wrap" gap="2">
+                    <Heading size="4">排除区</Heading>
+                    <Badge color={execution.excludedEntries.length ? 'amber' : 'green'} variant="soft">{execution.excludedEntries.length ? `${execution.excludedEntries.length} 项条件不足` : '无排除项'}</Badge>
+                  </Flex>
+                  <Text size="1" color="gray" as="p">以下检查项标明的运行条件未被本次航班选择，执行时跳过；如需执行请勾选对应航班条件。</Text>
+                  {execution.excludedEntries.length ? (
+                    <div className="exclusion-list">
+                      {execution.excludedEntries.map(({ item, missing, stage }) => (
+                        <div key={item.id} className={`exclusion-row ${item.critical ? 'critical' : ''}`}>
+                          <div className="exclusion-copy">
+                            <Flex gap="2" align="center" wrap="wrap">
+                              <strong>{item.challenge || '未命名检查项'}</strong>
+                              {item.critical && <Badge color="red" size="1">关键</Badge>}
+                              <Text size="1" color="gray">{stage.name}</Text>
+                            </Flex>
+                            <small>缺少：{formatConditions(missing)}（要求 {formatConditions(item.requiredConditions)}）</small>
+                          </div>
+                          <Button size="1" variant="soft" onClick={() => { setSelectedItemId(item.id); setActiveTab('editor'); }}>查看配置</Button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : <Callout.Root color="green" mt="3"><Callout.Text>当前航班条件覆盖了全部检查项，没有需要排除的项目。</Callout.Text></Callout.Root>}
+                </Card>
               </div>
             </Tabs.Content>
 
@@ -494,7 +625,11 @@ function PrintableChecklist({ project, compact = false }: { project: ChecklistPr
             <thead><tr><th style={{ width: '34%' }}>挑战语</th><th style={{ width: '25%' }}>预期回应</th><th>异常处理</th></tr></thead>
             <tbody>
               {project.items.filter((item) => item.stageId === stage.id).sort((a, b) => a.order - b.order).map((item) => (
-                <tr key={item.id}><td>{item.critical && <span className="critical-mark">◆</span>} {item.challenge}</td><td><strong>{item.response || '未填写'}</strong></td><td>{item.abnormalProcedure || '—'}</td></tr>
+                <tr key={item.id}>
+                  <td>{item.critical && <span className="critical-mark">◆</span>} {item.challenge}{item.requiredConditions.length > 0 && <span className="print-conditions"> [{item.requiredConditions.map((condition) => conditionMeta[condition].short).join('·')}]</span>}</td>
+                  <td><strong>{item.response || '未填写'}</strong></td>
+                  <td>{item.abnormalProcedure || '—'}</td>
+                </tr>
               ))}
               {!project.items.some((item) => item.stageId === stage.id) && <tr><td colSpan={3}>本阶段暂无检查项</td></tr>}
             </tbody>

@@ -1,3 +1,4 @@
+import { formatConditions, missingConditions } from './conditions';
 import type { ChecklistItem, ChecklistProject, ValidationIssue } from './types';
 
 const normalize = (value: string) => value.trim().replace(/\s+/g, ' ').toLocaleLowerCase('en');
@@ -6,6 +7,7 @@ export function validateProject(project: ChecklistProject): ValidationIssue[] {
   const issues: ValidationIssue[] = [];
   const stageById = new Map(project.stages.map((stage) => [stage.id, stage]));
   const itemById = new Map(project.items.map((item) => [item.id, item]));
+  const flightConditions = project.flightConditions ?? [];
 
   const add = (issue: ValidationIssue) => issues.push(issue);
 
@@ -14,6 +16,20 @@ export function validateProject(project: ChecklistProject): ValidationIssue[] {
   project.items.forEach((item) => {
     if (normalize(item.challenge)) challenges.set(normalize(item.challenge), [...(challenges.get(normalize(item.challenge)) ?? []), item]);
     if (normalize(item.response)) responses.set(normalize(item.response), [...(responses.get(normalize(item.response)) ?? []), item]);
+    const excluded = missingConditions(item, flightConditions);
+    if (excluded.length > 0) {
+      add({
+        id: `${item.id}-condition-excluded`,
+        type: 'condition-excluded',
+        level: item.critical ? 'error' : 'info',
+        stageId: item.stageId,
+        itemId: item.id,
+        title: item.critical ? '关键检查项被运行条件排除' : '检查项因运行条件被排除',
+        detail: item.critical
+          ? `${item.challenge || '未命名检查项'} 要求 ${formatConditions(excluded)}，当前航班条件不满足；关键项被排除时不能提交复核。`
+          : `${item.challenge || '未命名检查项'} 要求 ${formatConditions(excluded)}，本次航班条件下进入排除区。`
+      });
+    }
     if (!item.challenge.trim()) {
       add({ id: `${item.id}-empty-challenge`, type: 'missing-response', level: 'error', stageId: item.stageId, itemId: item.id, title: '检查项缺少挑战语', detail: '每项必须有可供机组读取的挑战语。' });
     }

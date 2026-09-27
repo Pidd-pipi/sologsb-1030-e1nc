@@ -1,6 +1,16 @@
+import { conditionMeta } from './conditions';
 import type { ChecklistItem, ChecklistProject, ChecklistRevision, DiffEntry, VersionOption } from './types';
 
 const itemLabel = (item: ChecklistItem) => `${item.challenge || '未命名'} → ${item.response || '未填写'}`;
+
+const conditionLabel = (item: ChecklistItem) =>
+  item.requiredConditions?.length ? ` [条件: ${item.requiredConditions.map((condition) => conditionMeta[condition].label).join('+')}]` : ' [条件: 无]';
+
+const describeItem = (item: ChecklistItem) => `${itemLabel(item)}${item.critical ? ' [关键]' : ''}${conditionLabel(item)}`;
+
+/** 忽略时间戳并规整条件顺序后比较，旧快照缺少条件字段时按空数组处理。 */
+const comparable = (item: ChecklistItem) =>
+  JSON.stringify({ ...item, updatedAt: '', requiredConditions: [...(item.requiredConditions ?? [])].sort() });
 
 export function buildVersionOptions(project: ChecklistProject): VersionOption[] {
   return [
@@ -23,16 +33,16 @@ export function diffVersions(project: ChecklistProject, leftId: string, rightId:
     const after = newItems.get(id);
     const stageName = (item?: ChecklistItem) => project.stages.find((stage) => stage.id === item?.stageId)?.name ?? '未分配阶段';
     if (!before && after) {
-      entries.push({ type: 'added', key: id, stage: stageName(after), before: '—', after: itemLabel(after) });
+      entries.push({ type: 'added', key: id, stage: stageName(after), before: '—', after: describeItem(after) });
     } else if (before && !after) {
-      entries.push({ type: 'removed', key: id, stage: stageName(before), before: itemLabel(before), after: '—' });
-    } else if (before && after && JSON.stringify({ ...before, updatedAt: '' }) !== JSON.stringify({ ...after, updatedAt: '' })) {
+      entries.push({ type: 'removed', key: id, stage: stageName(before), before: describeItem(before), after: '—' });
+    } else if (before && after && comparable(before) !== comparable(after)) {
       entries.push({
         type: 'changed',
         key: id,
         stage: stageName(after),
-        before: `${itemLabel(before)}${before.critical ? ' [关键]' : ''}`,
-        after: `${itemLabel(after)}${after.critical ? ' [关键]' : ''}`
+        before: describeItem(before),
+        after: describeItem(after)
       });
     }
   }

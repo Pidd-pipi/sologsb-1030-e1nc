@@ -1,6 +1,7 @@
 export type WorkflowStatus = 'draft' | 'review' | 'frozen';
 export type IssueLevel = 'error' | 'warning' | 'info';
-export type IssueType = 'duplicate' | 'missing-response' | 'unreachable-precondition' | 'stage-order' | 'orphan-stage';
+export type IssueType = 'duplicate' | 'missing-response' | 'unreachable-precondition' | 'stage-order' | 'orphan-stage' | 'condition-excluded';
+export type OperationCondition = 'night' | 'icing' | 'ifr';
 
 export interface FlightStage {
   id: string;
@@ -18,6 +19,7 @@ export interface ChecklistItem {
   critical: boolean;
   preconditionIds: string[];
   abnormalProcedure: string;
+  requiredConditions: OperationCondition[];
   updatedAt: string;
 }
 
@@ -39,13 +41,14 @@ export interface ChecklistProject {
   status: WorkflowStatus;
   updatedAt: string;
   reviewNote: string;
+  flightConditions: OperationCondition[];
   stages: FlightStage[];
   items: ChecklistItem[];
   revisions: ChecklistRevision[];
 }
 
 export interface WorkspaceState {
-  schemaVersion: 1;
+  schemaVersion: 2;
   selectedProjectId: string;
   projects: ChecklistProject[];
 }

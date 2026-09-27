@@ -1,4 +1,4 @@
-import type { ChecklistItem, ChecklistProject, FlightStage, WorkspaceState } from './types';
+import type { ChecklistItem, ChecklistProject, FlightStage, OperationCondition, WorkspaceState } from './types';
 
 const stages: FlightStage[] = [
   { id: 'stage-preflight', name: '飞行前检查', order: 0, description: '驾驶舱准备与飞机状态核对。' },
@@ -18,7 +18,8 @@ const item = (
   response: string,
   critical = false,
   preconditionIds: string[] = [],
-  abnormalProcedure = ''
+  abnormalProcedure = '',
+  requiredConditions: OperationCondition[] = []
 ): ChecklistItem => ({
   id,
   stageId,
@@ -28,10 +29,12 @@ const item = (
   critical,
   preconditionIds,
   abnormalProcedure,
+  requiredConditions,
   updatedAt: '2026-09-25T00:00:00.000Z'
 });
 
-const items: ChecklistItem[] = [
+// 历史冻结版本共用的基线项目。
+const baseItems: ChecklistItem[] = [
   item('item-battery', 'stage-preflight', 0, '电瓶', 'ON', true, [], '若电瓶电压低于 24V，停止启动并联系机务。'),
   item('item-fuel', 'stage-preflight', 1, '燃油量', 'CHECKED', true, [], '燃油不可用或存在水分时，停止任务。'),
   item('item-altimeter', 'stage-preflight', 2, '高度表', 'SET', false, [], '核对场压并交叉检查左右高度表。'),
@@ -49,6 +52,14 @@ const items: ChecklistItem[] = [
   item('item-landing-clear', 'stage-landing', 1, '着陆跑道', 'CLEAR', true, ['item-runway'], '跑道不安全时执行复飞。')
 ];
 
+// 当前编辑版本：为最低高度补充仪表飞行要求，并新增按运行条件启用的检查项。
+const currentItems: ChecklistItem[] = [
+  ...baseItems.map((entry) => (entry.id === 'item-minimums' ? { ...entry, requiredConditions: ['ifr'] as OperationCondition[] } : entry)),
+  item('item-nav-lights', 'stage-preflight', 3, '航行灯', 'ON', false, ['item-battery'], '夜间运行前必须确认航行灯工作正常。', ['night']),
+  item('item-pitot-heat', 'stage-preflight', 4, '皮托管加温', 'ON', false, ['item-battery'], '结冰条件下必须确认加温工作，空速异常时参考备用仪表。', ['icing']),
+  item('item-ifr-clearance', 'stage-taxi', 2, 'IFR 许可', 'RECEIVED', true, ['item-taxi-clearance'], '未收到仪表飞行许可时不得进入仪表气象条件。', ['ifr'])
+];
+
 const project: ChecklistProject = {
   id: 'project-c172',
   name: 'C172 标准操作检查单',
@@ -57,8 +68,9 @@ const project: ChecklistProject = {
   status: 'draft',
   updatedAt: '2026-09-25T00:12:00.000Z',
   reviewNote: '',
+  flightConditions: [],
   stages: structuredClone(stages),
-  items: structuredClone(items),
+  items: structuredClone(currentItems),
   revisions: [
     {
       id: 'revision-2',
@@ -67,7 +79,7 @@ const project: ChecklistProject = {
       createdAt: '2026-09-20T04:20:00.000Z',
       note: '训练飞行前发布版本',
       stages: structuredClone(stages),
-      items: structuredClone(items.filter((entry) => entry.id !== 'item-pressurization').map((entry) => entry.id === 'item-flaps' ? { ...entry, response: 'CHECKED' } : entry))
+      items: structuredClone(baseItems.filter((entry) => entry.id !== 'item-pressurization').map((entry) => entry.id === 'item-flaps' ? { ...entry, response: 'CHECKED' } : entry))
     },
     {
       id: 'revision-1',
@@ -76,13 +88,13 @@ const project: ChecklistProject = {
       createdAt: '2026-09-12T07:30:00.000Z',
       note: '初始基线',
       stages: structuredClone(stages.slice(0, 5)),
-      items: structuredClone(items.filter((entry) => entry.id !== 'item-pressurization' && entry.id !== 'item-landing-clear'))
+      items: structuredClone(baseItems.filter((entry) => entry.id !== 'item-pressurization' && entry.id !== 'item-landing-clear'))
     }
   ]
 };
 
 export const createInitialState = (): WorkspaceState => ({
-  schemaVersion: 1,
+  schemaVersion: 2,
   selectedProjectId: project.id,
   projects: [project]
 });
